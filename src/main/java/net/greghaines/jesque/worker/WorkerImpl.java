@@ -25,10 +25,7 @@ import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.text.SimpleDateFormat;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Date;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.BlockingDeque;
 import java.util.concurrent.Callable;
 import java.util.concurrent.LinkedBlockingDeque;
@@ -107,7 +104,7 @@ public class WorkerImpl implements Worker {
     protected final Config config;
     protected final Jedis jedis;
     protected final String namespace;
-    protected final BlockingDeque<String> queueNames = new LinkedBlockingDeque<String>();
+    protected final List<String> queueNames = new ArrayList<>();
     private final String name;
     protected final WorkerListenerDelegate listenerDelegate = new WorkerListenerDelegate();
     protected final AtomicReference<State> state = new AtomicReference<State>(NEW);
@@ -397,44 +394,42 @@ public class WorkerImpl implements Worker {
      * Polls the queues for jobs and executes them.
      */
     protected void poll() {
-        int missCount = 0;
+        int currentPriority = 0;
         String curQueue = null;
-        while (RUNNING.equals(this.state.get())) {
-            try {
+        try {
+            for (;RUNNING.equals(this.state.get());checkPaused()) {
+                curQueue = getCurrentQueue(currentPriority);
                 if (threadNameChangingEnabled) {
                     renameThread("Waiting for " + JesqueUtils.join(",", this.queueNames));
                 }
-                curQueue = this.queueNames.poll(EMPTY_QUEUE_SLEEP_TIME, TimeUnit.MILLISECONDS);
-                if (curQueue != null) {
-                    this.queueNames.add(curQueue); // Rotate the queues
-                    checkPaused(); 
-                    // Might have been waiting in poll()/checkPaused() for a while
-                    if (RUNNING.equals(this.state.get())) {
-                        this.listenerDelegate.fireEvent(WORKER_POLL, this, curQueue, null, null, null, null);
-                        final String payload = pop(curQueue);
-                        if (payload != null) {
-                            final Job job = ObjectMapperFactory.get().readValue(payload, Job.class);
-                            process(job, curQueue);
-                            missCount = 0;
-                        } else if (++missCount >= this.queueNames.size() && RUNNING.equals(this.state.get())) {
-                            // Keeps worker from busy-spinning on empty queues
-                            missCount = 0;
-                            Thread.sleep(EMPTY_QUEUE_SLEEP_TIME);
-                        }
+                final String payload = pop(curQueue);
+                if (payload != null) {
+                    currentPriority = 0;
+                    process(ObjectMapperFactory.get().readValue(payload, Job.class), curQueue);
+                } else {
+                    currentPriority++;
+                    if(currentPriority == queueNames.size()) {
+                        // Keeps worker from busy-spinning on empty queues
+                        currentPriority = 0;
+                        Thread.sleep(EMPTY_QUEUE_SLEEP_TIME);
                     }
                 }
-            } catch (InterruptedException ie) {
-                if (!isShutdown()) {
-                    recoverFromException(curQueue, ie);
-                }
-            } catch (JsonParseException | JsonMappingException e) {
-                // If the job JSON is not deserializable, we never want to submit it again...
-                removeInFlight(curQueue);
-                recoverFromException(curQueue, e);
-            } catch (Exception e) {
-                recoverFromException(curQueue, e);
             }
+        } catch (InterruptedException ie) {
+            if (!isShutdown()) {
+                recoverFromException(curQueue, ie);
+            }
+        } catch (JsonParseException | JsonMappingException e) {
+            // If the job JSON is not deserializable, we never want to submit it again...
+            removeInFlight(curQueue);
+            recoverFromException(curQueue, e);
+        } catch (Exception e) {
+            recoverFromException(curQueue, e);
         }
+    }
+
+    private String getCurrentQueue(int currentPriority) {
+        return currentPriority < queueNames.size() ? queueNames.get(currentPriority) : null;
     }
 
     /**
