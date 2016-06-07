@@ -198,7 +198,7 @@ public class WorkerImpl implements Worker {
             throw new IllegalArgumentException("jedis must not be null");
         }
         checkQueues(queues);
-        this.nextQueueStrategy = nextQueueStrategy;
+        this.nextQueueStrategy = determineNextQueueStartegy(queues, nextQueueStrategy);
         this.config = config;
         this.jobFactory = jobFactory;
         this.namespace = config.getNamespace();
@@ -208,6 +208,15 @@ public class WorkerImpl implements Worker {
         authenticateAndSelectDB();
         setOrderedPriorityQueues(queues);
         this.name = createName();
+    }
+
+    private WorkerImpl.NextQueueStrategy determineNextQueueStartegy(
+            List<String> queues,
+            WorkerImpl.NextQueueStrategy nextQueueStrategy) {
+        if (queues.size() <= 1) {
+            return WorkerImpl.NextQueueStrategy.DRAIN_WHILE_MESSAGES_EXISTS;
+        }
+        return nextQueueStrategy;
     }
 
     /**
